@@ -1,0 +1,80 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  azureServiceConnection: "flask-cicd-azure"
+  webAppName: "madan-flask-cicd"
+  pythonVersion: "3.11"
+
+stages:
+
+  # ─── STAGE 1: BUILD & TEST ───────────────────────────────────────────
+  - stage: Build
+    displayName: "Build & Test"
+    jobs:
+      - job: BuildJob
+        displayName: "Install, Lint & Run Tests"
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(pythonVersion)"
+            displayName: "Set up Python $(pythonVersion)"
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: "Install dependencies"
+
+          - script: |
+              pip install pytest pytest-azurepipelines
+              pytest test_app.py --doctest-modules --junitxml=junit/test-results.xml
+            displayName: "Run pytest"
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFiles: "junit/test-results.xml"
+              testRunTitle: "Flask App Tests"
+            condition: succeededOrFailed()
+            displayName: "Publish test results"
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(System.DefaultWorkingDirectory)"
+              includeRootFolder: false
+              archiveType: "zip"
+              archiveFile: "$(Build.ArtifactStagingDirectory)/app.zip"
+              replaceExistingArchive: true
+            displayName: "Zip app for deployment"
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+              ArtifactName: "drop"
+            displayName: "Publish build artifact"
+
+  # ─── STAGE 2: DEPLOY ─────────────────────────────────────────────────
+  - stage: Deploy
+    displayName: "Deploy to Azure App Service"
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployJob
+        displayName: "Deploy Flask App"
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebApp@1
+                  inputs:
+                    azureSubscription: "$(azureServiceConnection)"
+                    appType: "webAppLinux"
+                    appName: "$(webAppName)"
+                    package: "$(Pipeline.Workspace)/drop/app.zip"
+                    startUpCommand: "gunicorn --bind=0.0.0.0:8000 app:app"
+                  displayName: "Deploy to Azure App Service"
